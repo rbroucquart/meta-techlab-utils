@@ -70,8 +70,7 @@ do_configure_append() {
 
 do_install() {
     install -d ${D}/opt/mtca-tech-lab/dt
-    install -m 0644 ${B}/dts_app/${DT_FROM_BD_DTS_FILENAME} ${D}/opt/mtca-tech-lab/dt/
-    install -m 0644 ${B}/dts_app/app_from_bd_*.dts ${D}/opt/mtca-tech-lab/dt/
+    install -m 0644 ${B}/dts_app/app_from_bd*.dts ${D}/opt/mtca-tech-lab/dt/
 }
 
 FILES_${PN} = "/opt/mtca-tech-lab/dt/${DT_FROM_BD_DTS_FILENAME}"
