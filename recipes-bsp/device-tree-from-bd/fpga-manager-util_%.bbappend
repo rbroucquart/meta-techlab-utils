@@ -1,47 +1,48 @@
+require pl-variants.inc
+
 do_compile_prepend() {
-    if [ ${FPGA_MNGR_RECONFIG_ENABLE} = "1" ]; then
-        # Generate bin file for variants
-        for BITSTREAM_VAR in ${RECIPE_SYSROOT}/boot/bitstream-*/; do
-            echo BITSTREAM: ${BITSTREAM_VAR}
-            BITSTREAM_BASENAME=$(basename ${BITSTREAM_VAR})
-            PL_VARIANT=$(echo ${BITSTREAM_BASENAME} | cut -d- -f2)
-            echo PL_VARIANT: ${PL_VARIANT}
-
-            VAR_DESTDIR=${XSCTH_WS}/var-${PL_VARIANT}
-            mkdir -p ${VAR_DESTDIR}
-
-            if [ ${DT_FROM_BD_ENABLE} = "1" ]; then
-                cp ${RECIPE_SYSROOT}/boot/devicetree/pl-var-${PL_VARIANT}.dtbo ${VAR_DESTDIR}/base.dtbo
-            fi
-
-            BITPATH=${BITSTREAM_VAR}/*.bit
-            hdf=base
-            generate_bin
-            mv *.bit.bin_base ${VAR_DESTDIR}
-        done
-    fi
+    # Generate bin file for variants
+    for PL_VARIANT in ${PL_VARIANTS}; do
+        BITPATH=${RECIPE_SYSROOT}/boot/bitstream-${PL_VARIANT}/*.bit
+        VAR_DESTDIR=${XSCTH_WS}/var-${PL_VARIANT}
+        mkdir -p ${VAR_DESTDIR}
+        hdf=base
+        generate_bin
+        mv *.bit.bin_base ${VAR_DESTDIR}
+    done
 }
 
-# disable upstream do_install()
-# FIXME: Don't override this if FPGA_MNGR_RECONFIG_ENABLE not set
-do_install() {
-    if [ ${FPGA_MNGR_RECONFIG_ENABLE} = "1" ]; then
-        for VARIANT_DIR in ${XSCTH_WS}/var-*/; do
-            echo VARIANT_DIR: ${VARIANT_DIR}
-            PL_VARIANT=$(echo $(basename ${VARIANT_DIR}) | cut -d- -f2)
-            echo PL_VARIANT: ${PL_VARIANT}
-
+do_install_prepend() {
+    if [ "${PL_VARIANTS}" != "" ]; then
+        for PL_VARIANT in ${PL_VARIANTS}; do
             VAR_DESTDIR=${D}/lib/firmware/base/${PL_VARIANT}
 
             # Install base hdf bin & dtbo
-            newname=`basename -s .bin_base ${VARIANT_DIR}/*.bit.bin_base`
-            install -Dm 0644 ${VARIANT_DIR}/*.bit.bin_base ${VAR_DESTDIR}/${newname}.bin
-
+            # We force the binfile name to 'pl-full.bit.bin' both here and in device-tree.bbappend
+            install -Dm 0644 ${XSCTH_WS}/var-${PL_VARIANT}/*.bit.bin_base ${VAR_DESTDIR}/pl-full.bit.bin
             if [ ${DT_FROM_BD_ENABLE} = "1" ]; then
-                install -Dm 0644 ${VARIANT_DIR}/base.dtbo ${VAR_DESTDIR}
+                install -Dm 0644 ${RECIPE_SYSROOT}/boot/devicetree/pl-var-${PL_VARIANT}.dtbo ${VAR_DESTDIR}/base.dtbo
             fi
         done
+        return
     fi
 }
 
-DEPENDS += " bitstream-extraction"
+# Anonymous python function is called after parsing in each BitBake task (do_...)
+python () {
+    make_pl_subpackages(d, lambda hdf: f'/lib/firmware/base/{hdf}/*')
+
+    # Make sure that the main package RDEPENDS on its subpackages
+    rdep = 'RDEPENDS_' + d.getVar('PN')
+    d.setVar(rdep, (d.getVar(rdep) or '') + ' ' + d.getVar('SUBPKGS'))
+}
+
+DEPENDS += " bitstream-extraction external-hdf"
+
+PL_PKG_SUFFIX ?= ""
+HDF_SUFFIX ?= ""
+PKG_${PN} = "${PN}${PL_PKG_SUFFIX}${HDF_SUFFIX}"
+PKG_${PN}-lic = "${PN}${PL_PKG_SUFFIX}${HDF_SUFFIX}-lic"
+PKG_${PN}-base = "${PN}${PL_PKG_SUFFIX}${HDF_SUFFIX}-base"
+ALLOW_EMPTY_${PN}-base = "1"
+PACKAGES = "${SUBPKGS} ${PN}"
