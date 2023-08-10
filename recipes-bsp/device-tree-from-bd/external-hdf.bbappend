@@ -8,7 +8,7 @@ HDF_NAME = "only-used-for-git"
 HDF_EXT = "xsa"
 
 python do_install() {
-    import shutil
+    import shutil, os
 
     hw_path = os.path.join(d.getVar('D'), 'opt', 'xilinx', 'hw-design')
     os.makedirs(hw_path, exist_ok=True)
@@ -87,7 +87,7 @@ python () {
     for hdf in hdflist:
         hdf_path = next(Path(src_dir).rglob(f'{hdf}*.' + d.getVar('HDF_EXT')))
         rel_path = hdf_path.relative_to(src_dir)
-        hdfpath.append(str(rel_path))
+        hdfpath.append(str(hdf_path.absolute()))
         hdfvers.append(hdf_verinfo(hdf_path.stem))
         print(f'  Using {hdf} @ {hdfpath[-1]}, vers {hdfvers[-1]}')
 
