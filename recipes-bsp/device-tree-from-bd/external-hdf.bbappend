@@ -8,7 +8,7 @@ HDF_NAME = "only-used-for-git"
 HDF_EXT = "xsa"
 
 python do_install() {
-    import shutil, os
+    import shutil
 
     hw_path = os.path.join(d.getVar('D'), 'opt', 'xilinx', 'hw-design')
     os.makedirs(hw_path, exist_ok=True)
@@ -44,74 +44,107 @@ do_deploy() {
 python () {
     from pathlib import Path
     import re
-    re_ver = re.compile(r'(.+)[-_][vV]?(\d+\.\d+\.\d+)(-(\d+)-g([0-9a-f]+))?')
+    re_hdfname = re.compile(
+        r'(?P<projname>.+)[-_][vV]?(?P<version>\d+\.\d+\.\d+)(?P<opt1>-(?P<commits>\d+)-g(?P<hash>[0-9a-f]+))?(?P<opt2>-(?P<branch>.+))?$'
+    )
 
-    # Get HDF basename and version info from filename
-    # e.g. 'zu19eg_1.2.3-4-g10ba99f8.xsa'
+    # Get HDF version info from filename
+    # e.g. 'zu19eg_1.2.3-4-g10ba99f8-branchname.xsa'
     def hdf_verinfo(hdf_fullname):
-        m = re_ver.match(hdf_fullname)
+        m = re_hdfname.match(os.path.splitext(os.path.basename(hdf_fullname))[0])
         if not m:
             return None
-        g = m.groups() # ('zu19eg', '1.3.5', '-4-g10ba99f8', '4', '10ba99f8')
-        if not all(g[2:]):
-            return g[1]
-        return f'{g[1]}-git0+{g[4]}'
+        g = m.groupdict()
+        v_fmt = g['version'] # 1.2.3
+        if g['opt1']:
+            v_fmt += '-git0+' + g['hash'] # 1.2.3-git0+10ba99f8
+        return v_fmt
 
+    # Get HDF basename from filename
+    # Branch name, if available, will be suffixed
     def hdf_basename(hdf_fullname):
-        m = re_ver.match(hdf_fullname)
+        hdf_filename = os.path.splitext(os.path.basename(hdf_fullname))[0]
+        m = re_hdfname.match(hdf_filename)
         if not m:
-            return hdf_fullname
-        return m.groups()[0]
+            return hdf_filename
+        g = m.groupdict()
+        return g['projname'] # zu19eg
+    
+    # Resolve single PL file pointed at by HDF_PATH (may contain glob) and pick up version/name
+    def handle_single_hdf():
+        hdf_path = d.getVar('HDF_PATH')
+        if hdf_path.startswith('/'):
+            # absolute path
+            hdf_path = Path('/').glob(hdf_path[1:])
+        else:
+            # path relative to S
+            hdf_path = Path(d.getVar('S')).glob(hdf_path)
 
-    if not d.getVar('PL_VARIANTS'):
-        # Resolve HDF_PATH (may contain glob) and pick up PL version/name
-        hdf_path = os.path.join(d.getVar('S'), d.getVar('HDF_PATH'))
         try:
-            hdf_path = sorted(Path('/').glob(hdf_path[1:]))[0]
-            print(f'HDF_PATH_RESOLVED: ' + str(hdf_path))
+            hdf_path = sorted(hdf_path)[0]
             set_var_dynamic(d, 'HDF_ABSPATH', '', str(hdf_path))
-            set_var_dynamic(d, 'HDF_SUFFIX', '', '-' + hdf_basename(hdf_path.stem))
-            hdf_vers = hdf_verinfo(hdf_path.stem)
-            set_var_dynamic(d, 'PKGV', 'None', hdf_vers)
-        except Exception as e:
+            set_var_dynamic(d, 'HDF_SUFFIX', '', '-' + hdf_basename(hdf_path))
+            hdf_vers = hdf_verinfo(hdf_path)
+            set_var_dynamic(d, 'PKGV', 'None', hdf_vers or d.getVar('PV'))
+        except Exception:
+            # xsa may not be found, befor the fetcher is run - so we can't raise error here
             set_var_dynamic(d, 'PKGV', 'None')
             print(f'xsa not found')
         d.setVar('SUBPKGS', '')
         return
 
-    hdflist, hdfpath, hdfvers = d.getVar('PL_VARIANTS').split(), [], []
-    src_dir = d.getVar('PL_VARIANTS_DIR')
+    ############################################################################################
 
-    # Get HDF paths and versions
-    print(f'hdflist: {hdflist}, src_dir: {src_dir}')
-    for hdf in hdflist:
-        hdf_path = next(Path(src_dir).rglob(f'{hdf}*.' + d.getVar('HDF_EXT')))
-        rel_path = hdf_path.relative_to(src_dir)
-        hdfpath.append(str(hdf_path.absolute()))
-        hdfvers.append(hdf_verinfo(hdf_path.stem))
-        print(f'  Using {hdf} @ {hdfpath[-1]}, vers {hdfvers[-1]}')
+    hdf_list = (d.getVar('PL_VARIANTS') or '').split()
 
-    # hdflist now contains the variants names; hdfpath contains full paths of the .xsa files
-    d.setVar('PL_VARIANTS_PATHS', ' '.join(hdfpath))
-    d.setVar('PL_VARIANTS_VERSIONS', ' '.join(v or 'None' for v in hdfvers))
-    d.setVar('SRC_URI', ' '.join([f" {d.getVar('HDF_BASE')}{i}" for i in hdfpath]))
+    if not hdf_list:
+        # Use single HDF (no PL_VARIANTS)
+        return handle_single_hdf()
+
+    # OK, we have PL_VARIANTS. If we also have PL_VARIANTS_DIR, populate the SRC_URI from it
+    pl_var_dir = d.getVar('PL_VARIANTS_DIR')
+    if pl_var_dir:
+        d.setVar('SRC_URI', ' '.join(
+            'file://' + str(xsa_path.relative_to(pl_var_dir))
+            for xsa_path in Path(pl_var_dir).rglob('*.' + d.getVar('HDF_EXT'))
+        ))
+        d.setVar('FILESEXTRAPATHS', pl_var_dir + ":" + d.getVar('FILESEXTRAPATHS'))
+
+    # Determine HDF paths and versions from filenames in the SRC_URI list:
+    # 1) Get file paths (without 'file://' or 'http://' prefix) for all SRC_URI files that are HDF files
+    file_paths = [
+        src_uri_to_local_file(d, s) for s in d.getVar('SRC_URI').split()
+        if s.endswith('.' + d.getVar('HDF_EXT'))
+    ]
+
+    # 2) Make list of file paths, sorted to order of appearance in hdf_list
+    try:
+        hdf_paths = [
+            next(filter(lambda b: hdf_basename(b) == h, file_paths))
+            for h in hdf_list
+        ]
+    except Exception as e:
+        raise RuntimeError(f'{e}: file_paths {file_paths}, hdf_basenames {list(hdf_basename(b) for b in file_paths)}, hdf_list {hdf_list}')
+
+    # 3) Save file paths for all PL_VARIANTS to PL_VARIANTS_PATHS
+    d.setVar('PL_VARIANTS_PATHS', ' '.join(hdf_paths))
+
+    # 4) Get versions from file names and save them to PL_VARIANTS_VERSIONS
+    hdf_vers = [hdf_verinfo(n) for n in hdf_paths]
+    d.setVar('PL_VARIANTS_VERSIONS', ' '.join(v or 'None' for v in hdf_vers))
 
     # Get default variant
-    print("Determining the default PL variant:")
-    pl_variants_default = d.getVar('PL_VARIANTS_DEFAULT') or hdflist[0]
-    d.setVar('HDF_ABSPATH', hdfpath[hdflist.index(pl_variants_default)])
+    pl_variants_default = d.getVar('PL_VARIANTS_DEFAULT') or hdf_list[0]
+    d.setVar('HDF_ABSPATH', hdf_paths[hdf_list.index(pl_variants_default)])
 
-    # Split into subpackages
+    # Split package into subpackages
     pn, ps = d.getVar('PN'), d.getVar('PL_PKG_SUFFIX')
     subpkgs = []
-    for hdf, hdf_vers in zip(hdflist, hdfvers):
+    for hdf, hdf_vers in zip(hdf_list, hdf_vers):
         subpkg = pn + '-' + hdf
         subpkgs.append(subpkg)
         var_dest = os.path.join('/opt/xilinx/hw-design', hdf)
-        d.setVar('FILES_' + subpkg, ' '.join((
-            os.path.join(var_dest, 'design.xsa'),
-            (os.path.join(var_dest, 'version') if hdf_vers else '')
-        )))
+        d.setVar('FILES_' + subpkg, os.path.join(var_dest, '*'))
         d.setVar('PKG_' + subpkg, pn + ps + '-' + hdf)
         if hdf_vers:
             d.setVar('PKGV_' + subpkg, hdf_vers)
